@@ -6,20 +6,44 @@ import { ChallengePanel } from './components/ChallengePanel';
 import { challenges } from './data/challenges';
 import { Trophy, Code2, Play } from 'lucide-react';
 import type { Challenge } from './types/challenge';
+import { Alert } from './components/Alert';
+import * as Babel from '@babel/standalone';
+
+function evaluateCode(code: string) {
+  try {
+    const transformedCode = Babel.transform(code, {
+      presets: ['react'],
+    }).code;
+
+    const Component = new Function('React', 'useState', `
+      ${transformedCode}
+      return Challenge;
+    `)(React, React.useState);
+
+    return Component;
+  } catch (error) {
+    console.error('Code evaluation error:', error);
+    return null;
+  }
+}
 
 function App() {
   const [currentChallenge, setCurrentChallenge] = useState<Challenge>(challenges[0]);
   const [code, setCode] = useState(currentChallenge.initialCode);
-  const [timeLeft, setTimeLeft] = useState(40);
+  const [timeLeft, setTimeLeft] = useState(60);
   const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
   const [completed, setCompleted] = useState<number[]>([]);
+  const [alert, setAlert] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => {
       setTimeLeft((time) => {
         if (time <= 1) {
           handleTimeUp();
-          return 40;
+          return 60;
         }
         return time - 1;
       });
@@ -30,12 +54,11 @@ function App() {
 
   const handleTimeUp = useCallback(() => {
     if (!completed.includes(currentChallenge.id)) {
-      const nextIndex = challenges.findIndex(c => c.id === currentChallenge.id) + 1;
-      if (nextIndex < challenges.length) {
-        setCurrentChallenge(challenges[nextIndex]);
-        setCode(challenges[nextIndex].initialCode);
-        setIsCorrect(null);
-      }
+      setAlert({
+        type: 'error',
+        message: 'Times up! Keep trying - you can do this! 💪'
+      });
+      setTimeLeft(60);
     }
   }, [currentChallenge.id, completed]);
 
@@ -44,13 +67,81 @@ function App() {
   }, []);
 
   const handleSubmit = useCallback(() => {
-    const isCodeCorrect = code.replace(/\s/g, '') === currentChallenge.solution.replace(/\s/g, '');
-    setIsCorrect(isCodeCorrect);
-    
-    if (isCodeCorrect && !completed.includes(currentChallenge.id)) {
-      setCompleted([...completed, currentChallenge.id]);
+    try {
+      const userComponent = evaluateCode(code);
+      const solutionComponent = evaluateCode(currentChallenge.solution);
+      
+      if (!userComponent || !solutionComponent) {
+        setIsCorrect(false);
+        setAlert({
+          type: 'error',
+          message: 'Your code has syntax errors. Make sure your code is valid JavaScript/React.'
+        });
+        return;
+      }
+
+      try {
+        const userElement = userComponent({});
+        const solutionElement = solutionComponent({});
+
+        const isCorrect = validateComponents(userElement, solutionElement);
+        
+        setIsCorrect(isCorrect);
+        
+        if (isCorrect && !completed.includes(currentChallenge.id)) {
+          setCompleted([...completed, currentChallenge.id]);
+          setAlert({
+            type: 'success',
+            message: 'Excellent work! Moving to next challenge... 🎉'
+          });
+          
+          const nextIndex = challenges.findIndex(c => c.id === currentChallenge.id) + 1;
+          if (nextIndex < challenges.length) {
+            setTimeout(() => {
+              setCurrentChallenge(challenges[nextIndex]);
+              setCode(challenges[nextIndex].initialCode);
+              setIsCorrect(null);
+              setTimeLeft(60);
+            }, 1500);
+          }
+        } else if (!isCorrect) {
+          let errorMessage = 'Not quite right. ';
+          if (currentChallenge.type === 'state') {
+            errorMessage += 'Make sure you:\n' +
+              '1. Used useState hook\n' +
+              '2. Added an onClick handler to the button\n' +
+              '3. Used conditional rendering (? : or &&)\n' +
+              '4. Used the correct element type (button)';
+          } else {
+            errorMessage += 'Check if you have:\n' +
+              '1. Used the correct element type\n' +
+              '2. Included the exact text content';
+          }
+          setAlert({
+            type: 'error',
+            message: errorMessage
+          });
+        }
+      } catch (error) {
+        console.error('Component rendering error:', error);
+        setIsCorrect(false);
+        setAlert({
+          type: 'error',
+          message: 'Error rendering your component. Make sure you return valid JSX and use hooks correctly.'
+        });
+      }
+    } catch (error) {
+      console.error('Code evaluation error:', error);
+      setIsCorrect(false);
+      setAlert({
+        type: 'error',
+        message: 'Error in your code. Make sure you:\n' +
+          '1. Have valid JavaScript syntax\n' +
+          '2. Use useState at the top level\n' +
+          '3. Return valid JSX'
+      });
     }
-  }, [code, currentChallenge.solution, currentChallenge.id, completed]);
+  }, [code, currentChallenge, completed]);
 
   const handleNext = useCallback(() => {
     const nextIndex = challenges.findIndex(c => c.id === currentChallenge.id) + 1;
@@ -58,7 +149,7 @@ function App() {
       setCurrentChallenge(challenges[nextIndex]);
       setCode(challenges[nextIndex].initialCode);
       setIsCorrect(null);
-      setTimeLeft(40);
+      setTimeLeft(60);
     }
   }, [currentChallenge.id]);
 
@@ -103,8 +194,60 @@ function App() {
           </div>
         </div>
       </main>
+
+      {alert && (
+        <Alert
+          type={alert.type}
+          message={alert.message}
+          onClose={() => setAlert(null)}
+        />
+      )}
     </div>
   );
+}
+
+function validateComponents(
+  userElement: React.ReactElement, 
+  solutionElement: React.ReactElement
+) {
+  // Helper to get text content from an element
+  const getTextContent = (element: React.ReactElement): string => {
+    const getText = (el: any): string => {
+      if (typeof el === 'string') return el;
+      if (Array.isArray(el)) return el.map(getText).join('');
+      if (el?.props?.children) return getText(el.props.children);
+      return '';
+    };
+    return getText(element).replace(/\s+/g, ' ').trim();
+  };
+
+  // Helper to compare element types and structure
+  const compareElements = (user: React.ReactElement, solution: React.ReactElement): boolean => {
+    // Check if element types match
+    if (user.type !== solution.type) return false;
+
+    const userChildren = React.Children.toArray(user.props.children);
+    const solutionChildren = React.Children.toArray(solution.props.children);
+
+    // Check if number of children match
+    if (userChildren.length !== solutionChildren.length) return false;
+
+    // Compare text content if no children
+    if (userChildren.length === 0) {
+      return getTextContent(user) === getTextContent(solution);
+    }
+
+    // Recursively compare children
+    return userChildren.every((child, index) => {
+      const solutionChild = solutionChildren[index];
+      if (React.isValidElement(child) && React.isValidElement(solutionChild)) {
+        return compareElements(child, solutionChild);
+      }
+      return getTextContent(child as any) === getTextContent(solutionChild as any);
+    });
+  };
+
+  return compareElements(userElement, solutionElement);
 }
 
 export default App;
